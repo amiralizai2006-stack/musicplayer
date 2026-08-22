@@ -179,6 +179,104 @@ def test_search_returns_empty_when_disabled(monkeypatch):
     assert asyncio.run(searchbot.fetch("هرچی")) is None
 
 
+# ================================================================ تطبیق هوشمند
+def test_skeleton_matches_persian_and_finglish():
+    """اسکلت هم‌خوان‌ها: «دیوانه» ≡ «Divaneh»."""
+    from bot import searchbot as sb
+
+    assert sb._skeleton("دیوانه") == sb._skeleton("Divaneh")
+    assert sb._skeleton("شادمهر") == sb._skeleton("Shadmehr")
+    assert sb._skeleton("چاوشی") == sb._skeleton("Chavoshi")
+    assert sb._skeleton("همراه") == sb._skeleton("Hamrah")
+
+
+def test_skeleton_variants_cover_dropped_h_and_v():
+    """«گریه»/«Gerye» و «خواب»/«Khab» با گونه‌ها تطبیق می‌خورند."""
+    from bot import searchbot as sb
+
+    assert sb._skels("گریه") & sb._skels("Gerye")
+    assert sb._skels("خواب") & sb._skels("Khab")
+    assert sb._skels("تتلو") & sb._skels("Tataloo")
+
+
+def test_performer_words_excluded_from_title_score():
+    """کلمه‌های خواننده نباید امتیاز نام آهنگ را رقیق کنند.
+
+    باگ واقعی: «شادمهر عقیلی تماشا» با عنوان «Tamasha» فقط ۰.۳۳ می‌گرفت و
+    رد می‌شد، چون دو کلمه‌ی دیگر اسم خواننده بودند.
+    """
+    from bot import searchbot as sb
+
+    t, p = sb.parts("شادمهر عقیلی تماشا", "Tamasha", "Shadmehr Aghili")
+    assert t > 0.9 and p > 0.5
+
+
+def test_decide_picks_right_song_of_right_artist():
+    from bot import searchbot as sb
+
+    res = [{"title": "Mamnoon", "performer": "Shadmehr Aghili"},
+           {"title": "Tamasha", "performer": "Shadmehr Aghili"}]
+    i, conf = sb.decide("شادمهر عقیلی تماشا", res)
+    assert conf is True and i == 1
+
+
+def test_decide_no_guess_when_artist_lacks_song():
+    """تصمیم کاربر: آهنگ هم‌نام از خواننده‌ی دیگر انتخاب نشود و به یوتیوب هم
+    fallback نکند."""
+    from bot import searchbot as sb
+
+    res = [{"title": "Mamnoon", "performer": "Shadmehr Aghili"},
+           {"title": "Divooneh", "performer": "Siavash Ghomayshi"}]
+    i, conf = sb.decide("شادمهر عقیلی دیوانه", res)
+    assert conf is False and i == 0
+
+
+def test_decide_trusts_bot_order_on_vague_query():
+    from bot import searchbot as sb
+
+    res = [{"title": "Gerye Kon Baram", "performer": "Ali Navab"},
+           {"title": "Nefrin", "performer": "Artoush"}]
+    i, conf = sb.decide("الان گریه کن برام", res)
+    assert conf is True and i == 0
+
+
+def test_decide_empty_results():
+    from bot import searchbot as sb
+
+    assert sb.decide("هرچی", []) == (0, True)
+
+
+def test_best_index_wraps_decide():
+    from bot import searchbot as sb
+
+    res = [{"title": "A", "performer": "X"}, {"title": "Tamasha",
+                                              "performer": "Shadmehr Aghili"}]
+    assert sb.best_index("شادمهر عقیلی تماشا", res) == 1
+
+
+def test_database_mode_has_no_youtube_fallback():
+    """روش دیتابیس نباید به یوتیوب برود (تصمیم کاربر)."""
+    src = open("/opt/data/musicbot/bot/plugins/play.py", encoding="utf-8").read()
+    i = src.index("روش دیتابیس (ربات جستجو)")
+    j = src.index("# ---------- ساوندکلاد", i)
+    block = src[i:j]
+    assert "not_found_database" in block
+    assert "fallback به یوتیوب" not in block
+    assert "return None" in block
+
+
+def test_not_found_database_message():
+    from bot import messages as msg
+
+    text, ents, kb = msg.not_found_database("شادمهر دیوانه")
+    assert "در دیتابیس پیدا نشد" in text
+    assert "شادمهر دیوانه" in text
+    assert "پلتفرم" in text              # راهنمای عوض کردن روش
+    total = len(text.encode("utf-16-le")) // 2
+    for e in ents:
+        assert e.offset + e.length <= total
+
+
 def test_timeout_configurable(monkeypatch):
     from bot import searchbot
 

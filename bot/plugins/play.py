@@ -263,13 +263,16 @@ async def _search(chat_id: int, query: str, is_video: bool, status,
         LOGGER.debug("archive lookup direct: %s", e)
 
     # ---------- روش دیتابیس (ربات جستجو) ----------
+    # تصمیم کاربر: این روش به یوتیوب fallback **نمی‌کند**. اگر ربات جستجو
+    # آهنگ را نداشت یا تطبیق قاطع نبود، پیام «پیدا نشد» داده می‌شود تا کاربر
+    # اسم را دقیق‌تر بنویسد یا خودش روش را عوض کند.
     if mode == platform_pref.DATABASE:
         info = await _from_database_bot(client, query, status)
         if info:
             return info
-        LOGGER.info("SEARCHBOT نتیجه نداد → fallback به یوتیوب")
-        await _show(status, msg.searching(query, 1))
-        # fallback: مسیر یوتیوب (پایین‌تر ادامه می‌دهد)
+        LOGGER.info("SEARCHBOT نتیجه نداد | q=%s", query)
+        await _show(status, msg.not_found_database(query))
+        return None
 
     # ---------- ساوندکلاد ----------
     if mode == platform_pref.SOUNDCLOUD:

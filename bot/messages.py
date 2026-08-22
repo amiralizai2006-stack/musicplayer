@@ -101,6 +101,22 @@ def not_found(query: str = ""):
     return _pack(t, [[ui.btn("راهنما", "h|main", ui.PLAIN, ui.EMO_LIST)]])
 
 
+def not_found_database(query: str = ""):
+    """روش «دیتابیس» نتیجه نداد.
+
+    این روش عمداً به یوتیوب fallback نمی‌کند (تصمیم کاربر)، پس پیام باید
+    راه‌حل بدهد: اسم دقیق‌تر، یا عوض کردن روش از خود پنل.
+    """
+    t = _msg("در دیتابیس پیدا نشد", ui.EMO_DATABASE)
+    if query:
+        t.emoji(ui.EMO_ARROW_RED).add(" جست‌وجو : ")
+        t.code(ui.trunc(query, 40))
+        t.add("\n")
+    t.how("اسم خواننده و آهنگ را دقیق‌تر بنویس.")
+    t.how("یا از پنل، پلتفرم را روی یوتیوب / ساوندکلاد بگذار.")
+    return _pack(t, [[ui.btn("راهنما", "h|main", ui.PLAIN, ui.EMO_LIST)]])
+
+
 def too_long(duration_text: str, limit_text: str):
     t = _msg("طول محتوا بیش از حد مجاز است", ui.EMO_MOVIE)
     t.why(f"مدت این محتوا {ui.fa(duration_text)} است و سقف مجاز "

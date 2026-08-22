@@ -84,6 +84,202 @@ def _split_artist(title: str) -> tuple:
     return title, ""
 
 
+# ---------------------------------------------------------------- تطبیق
+# مسئله‌ی واقعی: عنوان‌های ربات جستجو **فینگلیش**‌اند («Divaneh») ولی کاربر
+# فارسی می‌نویسد («دیوانه»). حرف‌به‌حرف ترنسلیت جواب نمی‌دهد چون واکه‌های کوتاه
+# در فارسی نوشته نمی‌شوند. راه‌حل: مقایسه‌ی **اسکلت هم‌خوان‌ها**
+#   «دیوانه»  → d v n h
+#   «Divaneh» → d v n h   ✓
+_TRANSLIT = {
+    "ا": "a", "آ": "a", "ب": "b", "پ": "p", "ت": "t", "ث": "s", "ج": "j",
+    "چ": "c", "ح": "h", "خ": "x", "د": "d", "ذ": "z", "ر": "r", "ز": "z",
+    "ژ": "j", "س": "s", "ش": "c", "ص": "s", "ض": "z", "ط": "t", "ظ": "z",
+    "ع": "a", "غ": "g", "ف": "f", "ق": "g", "ک": "k", "گ": "g", "ل": "l",
+    # «و» هم‌خوان گرفته می‌شود (Divaneh/دیوانه) — در فینگلیش تقریباً همیشه v است
+    "م": "m", "ن": "n", "و": "v", "ه": "h", "ی": "i", "ئ": "i", "ء": "",
+}
+
+# واکه‌ها و نویسه‌هایی که در اسکلت حذف می‌شوند
+_VOWELS = set("aeiouy")
+
+
+def _skeleton(word: str) -> str:
+    """اسکلت هم‌خوان‌های یک کلمه (برای تطبیق فارسی↔فینگلیش).
+
+    «دیوانه» و «Divaneh» هر دو به `dvnh` می‌رسند؛ «شادمهر» و «Shadmehr» به `cdmhr`.
+    دوحرفی‌های فینگلیش (sh/ch/kh/gh/zh) به یک حرف نگاشت می‌شوند تا با نگاشت
+    فارسی هم‌خوان بمانند.
+    """
+    w = word.lower()
+    for a, b in (("sh", "c"), ("ch", "c"), ("kh", "x"), ("gh", "g"),
+                 ("zh", "j"), ("ph", "f"), ("th", "t"), ("ck", "k")):
+        w = w.replace(a, b)
+    w = "".join(_TRANSLIT.get(ch, ch) for ch in w)
+    out = []
+    for ch in w:
+        if ch in _VOWELS or not ch.isalnum():
+            continue
+        if out and out[-1] == ch:          # حرف مکرر را یکی کن
+            continue
+        out.append(ch)
+    return "".join(out)
+
+_STOPWORDS = {"اهنگ", "آهنگ", "موزیک", "پخش", "از", "با", "the", "a", "of",
+              "feat", "ft", "official", "music", "video", "remix", "audio"}
+
+
+def _norm_match(text: str) -> str:
+    """نرمال‌سازی سبک: یکسان‌سازی فارسی + حذف نویسه‌های نگارشی."""
+    from bot.facmd import normalize
+    t = normalize(text or "").lower()
+    t = re.sub(r"[^\w\s\u0600-\u06FF]+", " ", t)
+    return " ".join(t.split())
+
+
+def _tokens(text: str) -> list:
+    return [w for w in _norm_match(text).split()
+            if len(w) > 1 and w not in _STOPWORDS]
+
+
+def _variants(sk: str) -> set:
+    """گونه‌های یک اسکلت، برای پوشش ناهماهنگی‌های فارسی↔فینگلیش.
+
+    دو مورد در داده‌ی واقعی دیده شد:
+      · «ه» پایانی در فینگلیش می‌افتد → «گریه» = grh ولی «Gerye» = gr
+      · «و» گاهی واکه است نه هم‌خوان → «ممنون» = mnvn ولی «Mamnoon» = mn
+    """
+    out = {sk}
+    if sk.endswith("h") and len(sk) > 2:
+        out.add(sk[:-1])
+    if "v" in sk:
+        stripped = sk.replace("v", "")
+        if len(stripped) >= 2:
+            out.add(stripped)
+            if stripped.endswith("h") and len(stripped) > 2:
+                out.add(stripped[:-1])
+    return {v for v in out if len(v) >= 2}
+
+
+def _skels(text: str) -> set:
+    """مجموعه‌ی اسکلت کلمات (با گونه‌ها، خالی‌ها حذف می‌شوند)."""
+    out = set()
+    for w in _tokens(text):
+        out |= _variants(_skeleton(w))
+    return out
+
+
+def _cover(q: set, target: set) -> float:
+    """چه نسبتی از اسکلت‌های جست‌وجو در مجموعه‌ی هدف پیدا می‌شود (۰ تا ۱)."""
+    if not q or not target:
+        return 0.0
+    hit = 0.0
+    for w in q:
+        if w in target:
+            hit += 1.0
+            continue
+        # تطبیق جزئی: یکی زیررشته‌ی دیگری (صرف یا املای متفاوت)
+        for c in target:
+            if len(w) >= 3 and len(c) >= 3 and (w in c or c in w):
+                hit += 0.6
+                break
+    return hit / len(q)
+
+
+def _matched(q: set, target: set) -> set:
+    """کدام اسکلت‌های جست‌وجو در مجموعه‌ی هدف پیدا می‌شوند."""
+    out = set()
+    for w in q:
+        if w in target:
+            out.add(w)
+            continue
+        for c in target:
+            if len(w) >= 3 and len(c) >= 3 and (w in c or c in w):
+                out.add(w)
+                break
+    return out
+
+
+def parts(query: str, title: str, performer: str = "") -> tuple:
+    """(پوشش نام آهنگ، پوشش نام خواننده) — هر دو بین ۰ و ۱.
+
+    نکته‌ی مهم (با داده‌ی واقعی کشف شد): کلمه‌های مربوط به **خواننده** از
+    سنجش نام آهنگ کنار گذاشته می‌شوند. وگرنه در «شادمهر عقیلی تماشا» عنوان
+    «Tamasha» فقط ۱ از ۳ کلمه را پوشش می‌داد (۰.۳۳) و رد می‌شد، در حالی که
+    همان آهنگ درست است — دو کلمه‌ی دیگر اسم خواننده بودند.
+    """
+    q = _skels(query)
+    if not q:
+        return 0.0, 0.0
+    p_sk = _skels(performer)
+    perf_hits = _matched(q, p_sk)
+    perf_cov = len(perf_hits) / len(q) if q else 0.0
+    # نام آهنگ فقط با کلمه‌های باقی‌مانده سنجیده می‌شود
+    residual = q - perf_hits or q
+    return _cover(residual, _skels(title)), perf_cov
+
+
+def score(query: str, title: str, performer: str = "") -> float:
+    """امتیاز کلی تطبیق (نام آهنگ ×۱ + خواننده ×۰.۳۵).
+
+    تطبیق روی **اسکلت هم‌خوان‌ها** است چون عنوان‌های ربات جستجو فینگلیش‌اند
+    و کاربر فارسی می‌نویسد («دیوانه» ≡ «Divaneh» ≡ `dvnh`).
+    """
+    t, p = parts(query, title, performer)
+    return t + 0.35 * p
+
+
+# آستانه‌ها (با داده‌ی واقعی ربات کالیبره شدند)
+_T_IN_ARTIST = 0.34     # تطبیق نام آهنگ، وقتی خواننده هم درست است
+_T_GLOBAL = 0.60        # تطبیق نام آهنگ، وقتی خواننده جور نیست (سخت‌گیرتر)
+_T_ARTIST = 0.30        # از این مقدار بالاتر ⇒ خواننده در جست‌وجو آمده است
+
+
+def decide(query: str, results: list) -> tuple:
+    """(شماره‌ی نتیجه، مطمئن‌بودن) — منطق تأییدشده با پاسخ‌های واقعی ربات.
+
+    مراحل:
+      ۱) اگر خواننده‌ای در جست‌وجو آمده، **اول بین آهنگ‌های همان خواننده**
+         بگرد. ربات ۲۰ آهنگ از همان خواننده می‌دهد؛ بدون این قید یک ریمیکس
+         بی‌ربط از خواننده‌ی دیگر ممکن است برنده شود.
+      ۲) اگر آن خواننده این آهنگ را نداشت، در کل نتایج بگرد ولی با آستانه‌ی
+         سخت‌گیرتر (تطبیق باید واضح باشد).
+      ۳) **خواننده مشخص بود ولی آهنگش پیدا نشد** ⇒ (۰, False):
+         یعنی «مطمئن نیستم». مسیر پخش با این علامت به یوتیوب fallback می‌کند،
+         چون آهنگ هم‌نام از خواننده‌ی دیگر پاسخ درست نیست و نتیجه‌ی اولِ ربات
+         هم آهنگ دیگری از همان خواننده است.
+      ۴) خواننده‌ای مشخص نشده و تطبیق واضحی نبود ⇒ (۰, True): به ترتیب خودِ
+         ربات اعتماد می‌شود (جست‌وجوی مبهم، احتمالاً ربات بهتر می‌داند).
+    """
+    if not results:
+        return 0, True
+    scored = [(i, *parts(query, r.get("title", ""), r.get("performer", "")))
+              for i, r in enumerate(results)]
+
+    # ۱) خواننده‌ی خواسته‌شده در نتایج هست؟
+    in_artist = [(i, t) for i, t, p in scored if p >= _T_ARTIST]
+    if in_artist:
+        best_i, best_t = max(in_artist, key=lambda x: x[1])
+        if best_t >= _T_IN_ARTIST:
+            return best_i, True
+        # خواننده هست ولی این آهنگ را ندارد ⇒ **حدس نزن**.
+        # آهنگ هم‌نام از خواننده‌ی دیگر پاسخ درست نیست. (تصمیم کاربر: به
+        # یوتیوب هم نرود؛ پیام «پیدا نشد» داده می‌شود.)
+        return 0, False
+
+    # ۲) خواننده‌ای در جست‌وجو نبود ⇒ کل نتایج با آستانه‌ی سخت‌گیرتر
+    best_i, best_t = max(((i, t) for i, t, _p in scored), key=lambda x: x[1])
+    if best_t >= _T_GLOBAL:
+        return best_i, True
+
+    # ۳) جست‌وجوی مبهم ⇒ ترتیب خودِ ربات
+    return 0, True
+
+
+def best_index(query: str, results: list) -> int:
+    """فقط شماره‌ی نتیجه (برای سازگاری و استفاده‌های ساده)."""
+    return decide(query, results)[0]
+
+
 # ---------------------------------------------------------------- جست‌وجو
 async def search(query: str, want_video: bool = False) -> list:
     """inline query به ربات جستجو می‌زند و نتیجه‌ها را برمی‌گرداند.
@@ -135,8 +331,11 @@ async def search(query: str, want_video: bool = False) -> list:
     return out
 
 
-async def fetch(query: str, pick: int = 0) -> dict | None:
-    """نتیجه‌ی شماره‌ی `pick` را می‌گیرد، دانلود می‌کند و اطلاعاتش را برمی‌گرداند.
+async def fetch(query: str, pick: int | None = None) -> dict | None:
+    """بهترین نتیجه را می‌گیرد، دانلود می‌کند و اطلاعاتش را برمی‌گرداند.
+
+    `pick=None` (پیش‌فرض) ⇒ **تطبیق هوشمند**: بین ۲۰ نتیجه‌ی ربات، نزدیک‌ترین
+    به عبارت جست‌وجو انتخاب می‌شود. عدد بدهی، همان شماره برداشته می‌شود.
 
     خروجی: {"path", "title", "performer", "duration", "file_size"} یا None.
     پیام فرستاده‌شده در گروه جستجو پاک می‌شود تا گروه شلوغ نشود.
@@ -148,6 +347,16 @@ async def fetch(query: str, pick: int = 0) -> dict | None:
     results = await search(query)
     if not results:
         return None
+    if pick is None:
+        pick, confident = decide(query, results)
+        if not confident:
+            # خواننده مشخص بود ولی آهنگش بین نتایج نبود ⇒ حدس نزن.
+            # (تصمیم کاربر: به یوتیوب fallback نشود.)
+            LOGGER.info("SEARCHBOT: خواننده پیدا شد ولی آهنگ نه | q=%s", query)
+            return None
+        if pick:
+            LOGGER.info("SEARCHBOT تطبیق هوشمند: نتیجه %d انتخاب شد (%s)",
+                        pick + 1, results[pick].get("title", ""))
     pick = max(0, min(pick, len(results) - 1))
     chosen = results[pick]
 
