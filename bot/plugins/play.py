@@ -125,7 +125,6 @@ async def _gate(client: Client, message: Message) -> bool:
     # PV
     # ============================================================
     if message.chat.type.name == "PRIVATE":
-        # در خصوصی فقط مالک/کاربر ویژه طبق سیستم فعلی
         if not await auth.guard_message(client, message):
             return False
 
@@ -161,11 +160,7 @@ def _requester_name(message: Message) -> str:
 
 
 def _requester_id(message: Message) -> int:
-    """شناسه‌ی عددی درخواست‌کننده — برای منشن قابل کلیک در پنل.
-
-    منشن با شناسه‌ی عددی (text_mention) به یوزرنیم عمومی نیاز ندارد، پس برای
-    کاربرانی که یوزرنیم ندارند هم کار می‌کند.
-    """
+    """شناسه‌ی عددی درخواست‌کننده — برای منشن قابل کلیک در پنل."""
     u = message.from_user
     return int(u.id) if u else 0
 
@@ -213,7 +208,6 @@ async def _play_track(
         local_path=info.get("local_path", "") or "",
     )
 
-    # اگر منبع آرشیو است، رکورد آماده را به track بده تا دوباره جست‌وجو نشود
     if source == "archive" and info.get("archive_rec"):
         track._archive_rec = info["archive_rec"]
 
@@ -243,7 +237,7 @@ async def _play_track(
         return
 
     if pos == 0:
-        await status.delete()  # پنل پخش خودش ارسال می‌شود
+        await status.delete()
     else:
         await _show(
             status,
@@ -254,7 +248,6 @@ async def _play_track(
             )
         )
 
-    # لاگ پخش در کانال (بدون بلاک کردن پاسخ)
     try:
         import asyncio
         from bot import channel
@@ -286,7 +279,7 @@ def _archive_info(
     fallback_title: str,
     vid: str = ""
 ) -> dict:
-    """رکورد کانال دیتابیس را به شکل info قابل پخش برمی‌گرداند (بدون دانلود)."""
+    """رکورد کانال دیتابیس را به شکل info قابل پخش برمی‌گرداند."""
     return {
         "id": vid or ("q:" + fallback_title),
         "title": rec.get("title") or fallback_title,
@@ -307,10 +300,7 @@ async def _from_database_bot(
     query: str,
     status
 ):
-    """روش «دیتابیس»: از ربات جستجوی خودمان بگیر، دانلود کن، آماده‌ی پخش.
-
-    خروجی info با `stream_url` = مسیر فایل محلی، یا None اگر نشد.
-    """
+    """روش «دیتابیس»: از ربات جستجوی خودمان بگیر، دانلود کن."""
     from bot import channel
     from bot import searchbot
 
@@ -359,10 +349,8 @@ async def _search(
     status,
     client=None
 ):
-    """جست‌وجو طبق روش انتخابی گروه. info یا None.
+    """جست‌وجو طبق روش انتخابی گروه. info یا None."""
 
-    هر سه روش اول کانال دیتابیس خودمان را چک می‌کنند.
-    """
     from bot import channel
 
     mode = platform_pref.effective(chat_id)
@@ -422,8 +410,12 @@ async def _search(
             e
         )
 
-    # ---------- روش دیتابیس ----------
+    # ============================================================
+    # دیتابیس
+    # اگر پیدا نشد، خودکار می‌رود سراغ یوتیوب
+    # ============================================================
     if mode == platform_pref.DATABASE:
+
         info = await _from_database_bot(
             client,
             query,
@@ -434,14 +426,118 @@ async def _search(
             return info
 
         LOGGER.info(
-            "SEARCHBOT نتیجه نداد | q=%s",
+            "SEARCHBOT نتیجه نداد؛ انتقال به YOUTUBE | q=%s",
             query
         )
 
+        # --------------------------------------------------------
+        # دیتابیس نتیجه نداد؛ جست‌وجوی مستقیم یوتیوب
+        # --------------------------------------------------------
+        exact_title = ""
+        yt_vid = ""
+
+        try:
+            await _show(
+                status,
+                msg.searching(query, 2)
+            )
+
+            meta = await youtube.search_title(
+                query
+            )
+
+            exact_title = (
+                meta.get("title") or ""
+            ).strip()
+
+            yt_vid = meta.get("id") or ""
+
+        except Exception as e:  # noqa: BLE001
+            LOGGER.debug(
+                "youtube title search after database miss: %s",
+                e
+            )
+
+        # --------------------------------------------------------
+        # اگر نتیجه یوتیوب قبلاً در آرشیو وجود دارد
+        # --------------------------------------------------------
+        if exact_title or yt_vid:
+            try:
+                rec = channel.archive_lookup(
+                    video_id=yt_vid,
+                    query=(exact_title or query)
+                )
+
+                if rec:
+                    LOGGER.info(
+                        "ARCHIVE HIT AFTER DATABASE MISS | %s",
+                        rec.get("title")
+                    )
+
+                    return _archive_info(
+                        rec,
+                        exact_title or query,
+                        yt_vid
+                    )
+
+            except Exception as e:  # noqa: BLE001
+                LOGGER.debug(
+                    "archive lookup after youtube search: %s",
+                    e
+                )
+
+        # --------------------------------------------------------
+        # پخش مستقیم از یوتیوب
+        # --------------------------------------------------------
+        try:
+            await _show(
+                status,
+                msg.searching(
+                    exact_title or query,
+                    2
+                )
+            )
+
+            yt_info = await youtube.get_media(
+                query,
+                video=False
+            )
+
+            if yt_info and yt_info.get("stream_url"):
+                return yt_info
+
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning(
+                "youtube fallback error: %s",
+                e
+            )
+
+            friendly = logs.classify_youtube_error(
+                str(e)
+            )
+
+            url = (
+                await auth.resolve_support_url(client)
+                if client
+                else ""
+            )
+
+            await _show(
+                status,
+                msg.playback_error(
+                    e,
+                    url,
+                    friendly
+                )
+            )
+
+            return None
+
         await _show(
             status,
-            msg.not_found_database(query)
+            msg.not_found(query)
         )
+
         return None
 
     # ---------- ساوندکلاد ----------
