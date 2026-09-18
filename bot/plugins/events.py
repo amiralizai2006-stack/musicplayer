@@ -1,20 +1,20 @@
 """
-لاگ رویدادها + مدیریت کانال دیتابیس + نصب و ترفیع ربات سایلنت
+لاگ رویدادها + مدیریت کانال دیتابیس + نصب/حذف نصب + مدیران موزیک
 
-قابلیت‌ها:
-1) ثبت رویدادهای عضویت ربات در کانال لاگ
-2) مدیریت آرشیو آهنگ
-3) نصب ربات با:
-   نصب ربات سایلنت
-4) ترفیع دائمی ربات با ریپلای:
-   ترفیع ربات سایلنت
+دستورات:
 
-بعد از نصب یا ترفیع:
-- چت در دیتابیس ثبت می‌شود
-- پلیر فعال می‌شود
-- دسترسی پخش دائمی می‌شود
-- خرید اشتراک لازم نیست
-- دکمه‌های خرید تغییر نمی‌کنند
+نصب ربات سایلنت
+حذف نصب
+
+ترفیع موزیک
+عزل موزیک
+
+قوانین:
+- نصب و حذف نصب فقط توسط OWNER_ID
+- ترفیع و عزل موزیک توسط OWNER_ID یا مالک گروه
+- ترفیع موزیک دائمی است و در SQLite ذخیره می‌شود
+- حذف نصب، پلیر گروه را خاموش می‌کند
+- دکمه‌های خرید و سیستم آرشیو دست‌نخورده می‌مانند
 """
 
 from __future__ import annotations
@@ -41,11 +41,156 @@ _processing: set = set()
 
 
 # ================================================================
-# فعال‌سازی دائمی چت
+# ابزارهای کمکی
 # ================================================================
 
-async def _activate_chat(client: Client, chat_id: int) -> bool:
-    """ثبت، روشن‌کردن و دائمی‌کردن یک گروه/کانال."""
+def _status_name(member) -> str:
+    """نام وضعیت عضو را به صورت امن برمی‌گرداند."""
+    if not member:
+        return ""
+
+    status = getattr(member, "status", "")
+
+    return getattr(
+        status,
+        "name",
+        str(status),
+    ).upper()
+
+
+async def _is_chat_owner(
+    client: Client,
+    chat_id: int,
+    user_id: int,
+) -> bool:
+    """بررسی مالک بودن کاربر در گروه."""
+
+    if not user_id:
+        return False
+
+    if user_id == OWNER_ID:
+        return True
+
+    try:
+        member = await client.get_chat_member(
+            chat_id,
+            user_id,
+        )
+
+        return _status_name(member) == "OWNER"
+
+    except Exception as e:
+        LOGGER.debug(
+            "owner check failed chat=%s user=%s: %s",
+            chat_id,
+            user_id,
+            e,
+        )
+        return False
+
+
+async def _is_group_admin(
+    client: Client,
+    chat_id: int,
+    user_id: int,
+) -> bool:
+    """بررسی مدیر بودن کاربر."""
+
+    if not user_id:
+        return False
+
+    if user_id == OWNER_ID:
+        return True
+
+    try:
+        member = await client.get_chat_member(
+            chat_id,
+            user_id,
+        )
+
+        return _status_name(member) in (
+            "ADMINISTRATOR",
+            "OWNER",
+        )
+
+    except Exception as e:
+        LOGGER.debug(
+            "admin check failed chat=%s user=%s: %s",
+            chat_id,
+            user_id,
+            e,
+        )
+        return False
+
+
+async def _is_bot_admin(
+    client: Client,
+    chat_id: int,
+) -> bool:
+    """بررسی ادمین بودن ربات."""
+
+    try:
+        me = client.me
+
+        if me is None:
+            me = await client.get_me()
+
+        member = await client.get_chat_member(
+            chat_id,
+            me.id,
+        )
+
+        return _status_name(member) in (
+            "ADMINISTRATOR",
+            "OWNER",
+        )
+
+    except Exception as e:
+        LOGGER.debug(
+            "bot admin check failed chat=%s: %s",
+            chat_id,
+            e,
+        )
+        return False
+
+
+def _target_name(message: Message) -> str:
+    """نام کاربر موردنظر از روی ریپلای."""
+
+    user = getattr(
+        message,
+        "from_user",
+        None,
+    )
+
+    if not user:
+        return "کاربر"
+
+    if getattr(user, "first_name", None):
+        return user.first_name
+
+    if getattr(user, "username", None):
+        return "@" + user.username
+
+    return str(
+        getattr(user, "id", "کاربر")
+    )
+
+
+# ================================================================
+# نصب دائمی ربات
+# ================================================================
+
+async def _activate_chat(
+    client: Client,
+    chat_id: int,
+) -> bool:
+    """
+    فعال‌سازی دائمی گروه/کانال.
+
+    بعد از فعال‌سازی، تا وقتی «حذف نصب» زده نشود
+    ربات فعال باقی می‌ماند.
+    """
 
     try:
         db.add_chat(chat_id)
@@ -55,12 +200,13 @@ async def _activate_chat(client: Client, chat_id: int) -> bool:
             True,
         )
 
+        # 0 یعنی دائمی
         subscription.make_permanent(
             chat_id,
         )
 
         LOGGER.info(
-            "Silent bot permanently activated: %s",
+            "Silent bot permanently installed: %s",
             chat_id,
         )
 
@@ -69,6 +215,48 @@ async def _activate_chat(client: Client, chat_id: int) -> bool:
     except Exception as e:
         LOGGER.exception(
             "activate chat failed: %s",
+            e,
+        )
+        return False
+
+
+# ================================================================
+# حذف نصب ربات
+# ================================================================
+
+async def _deactivate_chat(
+    client: Client,
+    chat_id: int,
+) -> bool:
+    """
+    حذف نصب ربات.
+
+    گروه در دیتابیس باقی می‌ماند اما پلیر خاموش می‌شود.
+    """
+
+    try:
+        db.add_chat(chat_id)
+
+        group_config.set_enabled(
+            chat_id,
+            False,
+        )
+
+        # اشتراک دائمی نصب را هم حذف می‌کنیم.
+        subscription.sub_delete(
+            chat_id,
+        )
+
+        LOGGER.info(
+            "Silent bot uninstalled: %s",
+            chat_id,
+        )
+
+        return True
+
+    except Exception as e:
+        LOGGER.exception(
+            "deactivate chat failed: %s",
             e,
         )
         return False
@@ -89,19 +277,27 @@ async def _on_install_silent(
     message: Message,
 ):
     """
-    نصب ربات در گروه یا کانال.
-
-    ربات باید قبلاً در آن چت ادمین شده باشد.
+    فقط مالک اصلی ربات می‌تواند نصب کند.
     """
 
     try:
-        chat = message.chat
-
-        if not chat:
+        if not message.chat:
             return
 
+        user = message.from_user
+
+        # فقط OWNER_ID
+        if not user or user.id != OWNER_ID:
+            return
+
+        chat = message.chat
+
         chat_type = str(
-            getattr(chat, "type", "")
+            getattr(
+                chat,
+                "type",
+                "",
+            )
         ).upper()
 
         if not any(
@@ -116,81 +312,15 @@ async def _on_install_silent(
 
         chat_id = int(chat.id)
 
-        me = client.me
-
-        if me is None:
-            me = await client.get_me()
-
-        # --------------------------------------------------------
-        # بررسی ادمین بودن خود ربات
-        # --------------------------------------------------------
-
-        try:
-            bot_member = await client.get_chat_member(
-                chat_id,
-                me.id,
-            )
-
-            bot_status = getattr(
-                bot_member.status,
-                "name",
-                str(bot_member.status),
-            ).upper()
-
-        except Exception as e:
-            LOGGER.warning(
-                "install bot status check failed: %s",
-                e,
-            )
-            return
-
-        if bot_status not in (
-            "ADMINISTRATOR",
-            "OWNER",
+        # ربات باید ادمین باشد
+        if not await _is_bot_admin(
+            client,
+            chat_id,
         ):
+            await message.reply_text(
+                "❌ اول ربات سایلنت را ادمین کن."
+            )
             return
-
-        # --------------------------------------------------------
-        # در گروه فقط مدیر گروه بتواند نصب کند
-        # --------------------------------------------------------
-
-        is_channel = "CHANNEL" in chat_type
-
-        if not is_channel:
-
-            user = message.from_user
-
-            if not user:
-                return
-
-            try:
-                user_member = await client.get_chat_member(
-                    chat_id,
-                    user.id,
-                )
-
-                user_status = getattr(
-                    user_member.status,
-                    "name",
-                    str(user_member.status),
-                ).upper()
-
-            except Exception as e:
-                LOGGER.warning(
-                    "installer status check failed: %s",
-                    e,
-                )
-                return
-
-            if user_status not in (
-                "ADMINISTRATOR",
-                "OWNER",
-            ):
-                return
-
-        # --------------------------------------------------------
-        # فعال‌سازی دائمی
-        # --------------------------------------------------------
 
         ok = await _activate_chat(
             client,
@@ -198,15 +328,17 @@ async def _on_install_silent(
         )
 
         if not ok:
+            await message.reply_text(
+                "❌ نصب ربات انجام نشد."
+            )
             return
 
-        try:
-            await message.reply_text(
-                "✅ ربات سایلنت نصب و فعال شد.\n"
-                "🎵 پلیر آماده پخش است."
-            )
-        except Exception:
-            pass
+        await message.reply_text(
+            "✅ ربات سایلنت نصب شد.\n"
+            "🎵 پلیر فعال است.\n"
+            "♾️ این نصب دائمی است.\n"
+            "برای خاموش کردن: حذف نصب"
+        )
 
     except Exception as e:
         LOGGER.exception(
@@ -216,26 +348,100 @@ async def _on_install_silent(
 
 
 # ================================================================
-# ترفیع ربات سایلنت
+# حذف نصب
+# ================================================================
+
+@Client.on_message(
+    filters.text
+    & filters.regex(
+        r"^\s*حذف\s+نصب\s*$"
+    )
+)
+async def _on_uninstall_silent(
+    client: Client,
+    message: Message,
+):
+    """
+    فقط مالک اصلی ربات می‌تواند حذف نصب کند.
+    """
+
+    try:
+        if not message.chat:
+            return
+
+        user = message.from_user
+
+        # فقط مالک اصلی ربات
+        if not user or user.id != OWNER_ID:
+            return
+
+        chat = message.chat
+
+        chat_type = str(
+            getattr(
+                chat,
+                "type",
+                "",
+            )
+        ).upper()
+
+        if not any(
+            x in chat_type
+            for x in (
+                "GROUP",
+                "SUPERGROUP",
+                "CHANNEL",
+            )
+        ):
+            return
+
+        chat_id = int(chat.id)
+
+        ok = await _deactivate_chat(
+            client,
+            chat_id,
+        )
+
+        if not ok:
+            await message.reply_text(
+                "❌ حذف نصب انجام نشد."
+            )
+            return
+
+        await message.reply_text(
+            "🛑 ربات سایلنت حذف نصب شد.\n"
+            "🎵 پلیر این چت غیرفعال شد.\n"
+            "برای فعال‌سازی دوباره:\n"
+            "نصب ربات سایلنت"
+        )
+
+    except Exception as e:
+        LOGGER.exception(
+            "silent uninstall failed: %s",
+            e,
+        )
+
+
+# ================================================================
+# ترفیع موزیک
 # ================================================================
 
 @Client.on_message(
     filters.text
     & filters.reply
     & filters.regex(
-        r"^\s*ترفیع\s+ربات\s+سایلنت\s*$"
+        r"^\s*ترفیع\s+موزیک\s*$"
     )
 )
-async def _on_promote_silent(
+async def _on_promote_music(
     client: Client,
     message: Message,
 ):
     """
-    وقتی مدیر گروه روی پیام یک کاربر ریپلای کند و بنویسد:
+    مالک گروه یا مالک اصلی ربات می‌تواند
+    روی پیام کاربر ریپلای کند و بنویسد:
 
-        ترفیع ربات سایلنت
-
-    همان گروه بدون خرید اشتراک دائمی فعال می‌شود.
+        ترفیع موزیک
     """
 
     try:
@@ -245,10 +451,14 @@ async def _on_promote_silent(
             return
 
         chat_type = str(
-            getattr(chat, "type", "")
+            getattr(
+                chat,
+                "type",
+                "",
+            )
         ).upper()
 
-        # این دستور مخصوص گروه/سوپرگروه است
+        # فقط گروه و سوپرگروه
         if not any(
             x in chat_type
             for x in (
@@ -258,134 +468,196 @@ async def _on_promote_silent(
         ):
             return
 
-        user = message.from_user
+        command_user = message.from_user
 
-        # باید فرستنده‌ی دستور مدیر باشد
-        if not user:
+        if not command_user:
             return
 
-        try:
-            member = await client.get_chat_member(
-                chat.id,
-                user.id,
-            )
+        # فقط مالک اصلی یا مالک گروه
+        allowed = await _is_chat_owner(
+            client,
+            chat.id,
+            command_user.id,
+        )
 
-            status = getattr(
-                member.status,
-                "name",
-                str(member.status),
-            ).upper()
-
-        except Exception as e:
-            LOGGER.warning(
-                "promote installer check failed: %s",
-                e,
-            )
+        if not allowed:
             return
 
-        if status not in (
-            "ADMINISTRATOR",
-            "OWNER",
+        # ربات باید ادمین باشد
+        if not await _is_bot_admin(
+            client,
+            chat.id,
         ):
-            return
-
-        # ربات باید خودش ادمین باشد
-        me = client.me
-
-        if me is None:
-            me = await client.get_me()
-
-        try:
-            bot_member = await client.get_chat_member(
-                chat.id,
-                me.id,
-            )
-
-            bot_status = getattr(
-                bot_member.status,
-                "name",
-                str(bot_member.status),
-            ).upper()
-
-        except Exception as e:
-            LOGGER.warning(
-                "promote bot status check failed: %s",
-                e,
+            await message.reply_text(
+                "❌ ربات باید ادمین گروه باشد."
             )
             return
-
-        if bot_status not in (
-            "ADMINISTRATOR",
-            "OWNER",
-        ):
-            return
-
-        # --------------------------------------------------------
-        # ریپلای باید وجود داشته باشد
-        # --------------------------------------------------------
 
         target = message.reply_to_message
 
         if not target:
             return
 
-        # --------------------------------------------------------
-        # فعال‌سازی دائمی همان گروه
-        # --------------------------------------------------------
-
-        ok = await _activate_chat(
-            client,
-            chat.id,
-        )
-
-        if not ok:
-            return
-
         target_user = target.from_user
 
-        if target_user:
-            target_name = (
-                target_user.first_name
-                or (
-                    target_user.username
-                    and "@"
-                    + target_user.username
-                )
-                or str(target_user.id)
-            )
-        else:
-            target_name = "کاربر"
-
-        try:
+        if not target_user:
             await message.reply_text(
-                "✅ ترفیع انجام شد.\n"
-                f"👤 {target_name}\n"
-                "🎵 ربات سایلنت برای این گروه فعال شد.\n"
-                "♾️ دسترسی دائمی است."
+                "❌ روی پیام یک کاربر ریپلای کن."
             )
-        except Exception:
-            pass
+            return
+
+        # خود ربات را مدیر موزیک نکن
+        me = client.me
+
+        if me is None:
+            me = await client.get_me()
+
+        if target_user.id == me.id:
+            return
+
+        # ثبت دائمی در SQLite
+        db.add_music_admin(
+            chat.id,
+            target_user.id,
+            _target_name(target),
+        )
+
+        await message.reply_text(
+            "✅ ترفیع موزیک انجام شد.\n"
+            f"👤 {_target_name(target)}\n"
+            "🎵 دسترسی مدیریت موزیک فعال شد.\n"
+            "♾️ دائمی است تا زمانی که «عزل موزیک» زده شود."
+        )
 
         LOGGER.info(
-            "Silent promotion: chat=%s target=%s by=%s",
+            "Music admin promoted: chat=%s user=%s by=%s",
             chat.id,
-            getattr(
-                target_user,
-                "id",
-                0,
-            ),
-            user.id,
+            target_user.id,
+            command_user.id,
         )
 
     except Exception as e:
         LOGGER.exception(
-            "silent promotion failed: %s",
+            "music promotion failed: %s",
             e,
         )
 
 
 # ================================================================
-# کانال دیتابیس
+# عزل موزیک
+# ================================================================
+
+@Client.on_message(
+    filters.text
+    & filters.reply
+    & filters.regex(
+        r"^\s*عزل\s+موزیک\s*$"
+    )
+)
+async def _on_demote_music(
+    client: Client,
+    message: Message,
+):
+    """
+    مالک گروه یا مالک اصلی ربات می‌تواند
+    روی پیام مدیر موزیک ریپلای کند و بنویسد:
+
+        عزل موزیک
+    """
+
+    try:
+        chat = message.chat
+
+        if not chat:
+            return
+
+        chat_type = str(
+            getattr(
+                chat,
+                "type",
+                "",
+            )
+        ).upper()
+
+        if not any(
+            x in chat_type
+            for x in (
+                "GROUP",
+                "SUPERGROUP",
+            )
+        ):
+            return
+
+        command_user = message.from_user
+
+        if not command_user:
+            return
+
+        # فقط مالک اصلی یا مالک گروه
+        allowed = await _is_chat_owner(
+            client,
+            chat.id,
+            command_user.id,
+        )
+
+        if not allowed:
+            return
+
+        if not await _is_bot_admin(
+            client,
+            chat.id,
+        ):
+            await message.reply_text(
+                "❌ ربات باید ادمین گروه باشد."
+            )
+            return
+
+        target = message.reply_to_message
+
+        if not target:
+            return
+
+        target_user = target.from_user
+
+        if not target_user:
+            await message.reply_text(
+                "❌ روی پیام کاربر ریپلای کن."
+            )
+            return
+
+        removed = db.remove_music_admin(
+            chat.id,
+            target_user.id,
+        )
+
+        if not removed:
+            await message.reply_text(
+                "ℹ️ این کاربر مدیر موزیک نیست."
+            )
+            return
+
+        await message.reply_text(
+            "🛑 عزل موزیک انجام شد.\n"
+            f"👤 {_target_name(target)}\n"
+            "دسترسی مدیریت موزیک این کاربر قطع شد."
+        )
+
+        LOGGER.info(
+            "Music admin removed: chat=%s user=%s by=%s",
+            chat.id,
+            target_user.id,
+            command_user.id,
+        )
+
+    except Exception as e:
+        LOGGER.exception(
+            "music demotion failed: %s",
+            e,
+        )
+
+
+# ================================================================
+# آرشیو آهنگ در کانال
 # ================================================================
 
 @Client.on_message(
@@ -410,7 +682,10 @@ async def _on_archive_media(
         if message.id in _processing:
             return
 
-        media = message.audio or message.video
+        media = (
+            message.audio
+            or message.video
+        )
 
         if not media:
             return
@@ -449,7 +724,10 @@ async def _reprocess_forward(
     message: Message,
 ) -> None:
 
-    media = message.audio or message.video
+    media = (
+        message.audio
+        or message.video
+    )
 
     is_video = (
         message.video is not None
@@ -522,7 +800,9 @@ async def _reprocess_forward(
         )
 
         if sent:
-            _processing.add(sent.id)
+            _processing.add(
+                sent.id
+            )
 
             try:
                 await message.delete()
@@ -681,7 +961,7 @@ async def _on_archive_cb(
 
 
 # ================================================================
-# حذف قدیمی با ریپلای
+# حذف قدیمی آرشیو با ریپلای
 # ================================================================
 
 @Client.on_message(
