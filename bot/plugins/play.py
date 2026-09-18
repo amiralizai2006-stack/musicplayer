@@ -101,52 +101,100 @@ async def _deny_group(client: Client, message: Message) -> None:
 
 
 async def _gate(client: Client, message: Message) -> bool:
-    """گارد مشترک.
+    """گارد مشترک برای گروه، کانال و PV.
 
-    مالک ربات که شناسه‌اش در OWNER_ID است:
-      - بدون اشتراک گروه مجاز است.
-      - حتی اگر ادمین گروه نباشد مجاز است.
-      - در PV نیز دسترسی خودش را حفظ می‌کند.
+    گروه:
+      - OWNER_ID همیشه مجاز است.
+      - سایر کاربران طبق دسترسی قبلی بررسی می‌شوند.
 
-    سایر کاربران:
-      - قوانین قبلی دسترسی و اشتراک را حفظ می‌کنند.
+    کانال:
+      - Channel Post معمولاً from_user ندارد.
+      - بنابراین auth.guard_message برای کانال اجرا نمی‌شود.
+      - اگر کانال با «نصب ربات سایلنت» فعال شده باشد،
+        دستورات پخش و کنترل پخش اجازه‌ی اجرا دارند.
+
+    PV:
+      - همان منطق قبلی حفظ می‌شود.
     """
 
+    chat_id = message.chat.id
+    chat_type = message.chat.type.name
+
     # ============================================================
-    # 👑 مالک ربات: همیشه مجاز
+    # 👑 مالک اصلی ربات
     # ============================================================
-    #
-    # این بررسی عمداً قبل از gc.is_enabled() و auth.guard_message()
-    # انجام می‌شود تا OWNER_ID به اشتراک گروه یا ادمین بودن وابسته نباشد.
-    if message.from_user and message.from_user.id == config.OWNER_ID:
+    if (
+        message.from_user
+        and message.from_user.id == config.OWNER_ID
+    ):
         return True
 
     # ============================================================
-    # PV
+    # 🔒 PV / PRIVATE
     # ============================================================
-    if message.chat.type.name == "PRIVATE":
-        if not await auth.guard_message(client, message):
+    if chat_type == "PRIVATE":
+        if not await auth.guard_message(
+            client,
+            message
+        ):
             return False
 
         from bot.plugins.start import add_group_url
 
         await _send(
             message,
-            msg.group_only(await add_group_url(client))
+            msg.group_only(
+                await add_group_url(client)
+            )
+        )
+
+        return False
+
+    # ============================================================
+    # 📢 CHANNEL
+    # ============================================================
+    #
+    # پیام‌های کانال معمولاً from_user ندارند.
+    # پس auth.guard_message روی Channel Post اجرا نمی‌شود.
+    #
+    # فقط کانالی که قبلاً با «نصب ربات سایلنت» فعال شده
+    # اجازه‌ی استفاده از دستورات موزیک را دارد.
+    #
+    if chat_type == "CHANNEL":
+
+        if not gc.is_enabled(chat_id):
+            await _deny_group(
+                client,
+                message
+            )
+            return False
+
+        # ثبت کانال در دیتابیس
+        db.add_chat(chat_id)
+
+        # کانال فعال است
+        return True
+
+    # ============================================================
+    # 👥 GROUP / SUPERGROUP
+    # ============================================================
+    #
+    # منطق قبلی گروه حفظ شده است.
+    #
+    if not gc.is_enabled(chat_id):
+        await _deny_group(
+            client,
+            message
         )
         return False
 
     # ============================================================
-    # گروه: بررسی فعال بودن گروه برای کاربران عادی
+    # 🔐 بررسی دسترسی کاربر گروه
     # ============================================================
-    if not gc.is_enabled(message.chat.id):
-        await _deny_group(client, message)
-        return False
-
-    # ============================================================
-    # بررسی دسترسی کاربر
-    # ============================================================
-    if not await auth.guard_message(client, message):
+    if not await auth.guard_message(
+        client,
+        message
+    ):
         return False
 
     return True
