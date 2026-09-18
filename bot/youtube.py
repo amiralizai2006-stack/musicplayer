@@ -1,11 +1,4 @@
-"""جست‌وجو و استخراج اطلاعات از یوتیوب با استفاده از yt-dlp.
-
-استراتژی:
-  1. استفاده از PO Token provider (bgutil) که در Docker اجرا می‌شود.
-  2. اگر پروکسی واقعاً موجود باشد، استفاده از پروکسی.
-  3. اگر استخر پروکسی خالی باشد، مستقیماً با PO Token ادامه می‌دهیم.
-  4. چند player client برای افزایش سازگاری امتحان می‌شوند.
-"""
+"""YouTube search/extraction using yt-dlp."""
 
 import asyncio
 import os
@@ -34,7 +27,7 @@ _YDL_COMMON = {
 
 _AUDIO_FMT = os.environ.get(
     "AUDIO_FORMAT",
-    "worstaudio[abr>=48]/bestaudio[ext=m4a][abr<=96]/bestaudio/best",
+    "bestaudio[ext=m4a]/bestaudio/best",
 ).strip()
 
 _VIDEO_FMT = os.environ.get(
@@ -42,8 +35,6 @@ _VIDEO_FMT = os.environ.get(
     "(bestvideo[height<=?360][ext=mp4])+(bestaudio[ext=m4a])/best[height<=?360]/best",
 ).strip()
 
-
-# سرویس PO Token داخلی bgutil
 _POT_BASE_URL = os.environ.get(
     "POT_BASE_URL",
     "http://127.0.0.1:4416",
@@ -51,27 +42,28 @@ _POT_BASE_URL = os.environ.get(
 
 
 def _pot_available() -> bool:
-    """فعال بودن استفاده از PO Token provider."""
     return os.environ.get(
         "DISABLE_POT",
         "",
     ).strip().lower() not in ("1", "true", "yes")
 
 
-# کلاینت‌های مناسب برای تلاش مستقیم.
-# mweb و web_safari برای PO Token مناسب هستند.
+# کلاینت‌هایی که ابتدا امتحان می‌شوند.
+# tv و android_vr فعلاً برای GVS به PO Token نیاز ندارند.
 _CLIENTS_DIRECT = [
-    ["mweb"],
-    ["web_safari"],
-    None,
     ["tv"],
+    ["android_vr"],
+    ["web_safari"],
+    ["mweb"],
+    None,
     ["ios"],
 ]
 
-# کلاینت‌های سبک‌تر برای پروکسی
 _CLIENTS_PROXY = [
-    ["mweb"],
+    ["tv"],
+    ["android_vr"],
     ["web_safari"],
+    ["mweb"],
     None,
 ]
 
@@ -95,7 +87,9 @@ def has_cookies() -> bool:
 
 def _cookie_opts() -> dict:
     if has_cookies():
-        return {"cookiefile": config.COOKIES_FILE}
+        return {
+            "cookiefile": config.COOKIES_FILE
+        }
     return {}
 
 
@@ -118,17 +112,28 @@ def _pack(info: dict) -> dict:
         "id": info.get("id"),
         "title": info.get("title", "نامشخص"),
         "duration": info.get("duration"),
-        "duration_text": _format_duration(info.get("duration")),
+        "duration_text": _format_duration(
+            info.get("duration")
+        ),
         "stream_url": info.get("url"),
-        "webpage_url": info.get("webpage_url", ""),
+        "webpage_url": info.get(
+            "webpage_url",
+            "",
+        ),
         "thumbnail": info.get("thumbnail"),
-        "uploader": info.get("uploader", ""),
+        "uploader": info.get(
+            "uploader",
+            "",
+        ),
     }
 
 
 def _is_block_error(msg: str) -> bool:
     low = msg.lower()
-    return any(sign in low for sign in _BLOCK_SIGNS)
+    return any(
+        sign in low
+        for sign in _BLOCK_SIGNS
+    )
 
 
 def _run(
@@ -146,7 +151,6 @@ def _run(
         "format": fmt,
     }
 
-    # Node.js برای حل چالش‌های JavaScript یوتیوب
     js_rt = os.environ.get(
         "JS_RUNTIME",
         "node",
@@ -159,26 +163,33 @@ def _run(
 
     extractor_args = {}
 
-    # کلاینت یوتیوب
     if client:
         extractor_args["youtube"] = {
             "player_client": client
         }
 
-    # PO Token provider
-    if _pot_available():
-        extractor_args["youtubepot-bgutilhttp"] = {
+    # برای tv و android_vr نیازی به PO Token نیست.
+    # برای سایر کلاینت‌ها bgutil فعال می‌ماند.
+    if _pot_available() and client not in (
+        ["tv"],
+        ["android_vr"],
+    ):
+        extractor_args[
+            "youtubepot-bgutilhttp"
+        ] = {
             "base_url": [_POT_BASE_URL]
         }
 
     if extractor_args:
         opts["extractor_args"] = extractor_args
 
-    # پروکسی فقط وقتی واقعاً مقدار دارد
     if proxy:
         opts["proxy"] = proxy
         opts["socket_timeout"] = int(
-            os.environ.get("PROXY_TIMEOUT", "8")
+            os.environ.get(
+                "PROXY_TIMEOUT",
+                "8",
+            )
         )
         opts["retries"] = 0
 
@@ -211,10 +222,14 @@ def _run(
         )
 
         if "entries" in info:
-            if not info["entries"]:
-                raise ValueError("چیزی پیدا نشد")
+            entries = info.get("entries") or []
 
-            info = info["entries"][0]
+            if not entries:
+                raise ValueError(
+                    "چیزی پیدا نشد"
+                )
+
+            info = entries[0]
 
     return info
 
@@ -262,7 +277,7 @@ def _try_clients(
         hard = float(
             os.environ.get(
                 "ATTEMPT_HARD_TIMEOUT",
-                "20" if proxy else "60",
+                "20" if proxy else "45",
             )
         )
 
@@ -270,7 +285,12 @@ def _try_clients(
 
     for client in clients:
 
-        label = ",".join(client) if client else "auto"
+        label = (
+            ",".join(client)
+            if client
+            else "auto"
+        )
+
         pxy = (
             proxy.split("@")[-1]
             if proxy
@@ -310,8 +330,13 @@ def _try_clients(
 
                     logs.stage_fail(
                         "YT_TRY",
-                        err=f"مهلت {hard:.0f}s تمام شد",
-                        took=time.monotonic() - t0,
+                        err=(
+                            f"مهلت {hard:.0f}s تمام شد"
+                        ),
+                        took=(
+                            time.monotonic()
+                            - t0
+                        ),
                         client=label,
                         proxy=pxy,
                     )
@@ -320,14 +345,14 @@ def _try_clients(
                         f"hard timeout {hard}s"
                     )
 
-                    if proxy:
-                        return None, last_err
-
                     continue
 
             logs.stage_ok(
                 "YT_TRY",
-                took=time.monotonic() - t0,
+                took=(
+                    time.monotonic()
+                    - t0
+                ),
                 client=label,
                 proxy=pxy,
                 title=info.get(
@@ -345,8 +370,14 @@ def _try_clients(
 
             logs.stage_fail(
                 "YT_TRY",
-                err=f"{type(e).__name__}: {msg[:120]}",
-                took=time.monotonic() - t0,
+                err=(
+                    f"{type(e).__name__}: "
+                    f"{msg[:120]}"
+                ),
+                took=(
+                    time.monotonic()
+                    - t0
+                ),
                 client=label,
                 proxy=pxy,
             )
@@ -367,7 +398,6 @@ def _try_clients(
 
 
 def _get_proxy_list() -> list:
-    """فقط پروکسی‌های واقعاً موجود را برمی‌گرداند."""
 
     if not proxies.enabled():
         return []
@@ -385,10 +415,12 @@ def _get_proxy_list() -> list:
         return result or []
 
     except Exception as e:
+
         logs.info(
             "YT: دریافت پروکسی ناموفق: %s",
             e,
         )
+
         return []
 
 
@@ -415,9 +447,7 @@ def _extract_with_fallback(
         else _AUDIO_FMT
     )
 
-    # ابتدا استخر واقعی پروکسی را بررسی می‌کنیم.
     proxy_list = _get_proxy_list()
-
     use_proxy = bool(proxy_list)
 
     logs.info(
@@ -438,7 +468,6 @@ def _extract_with_fallback(
         in ("1", "true", "yes")
     )
 
-    # اگر پروکسی واقعی داریم و PROXY_FIRST فعال است.
     if use_proxy and proxy_first:
 
         info = _via_proxies(
@@ -453,13 +482,8 @@ def _extract_with_fallback(
         if info is not None:
             return info
 
-        logs.info(
-            "YT: پروکسی‌ها ناموفق بودند؛ "
-            "تلاش مستقیم با PO Token"
-        )
-
-    # حالت اصلی:
-    # اول مستقیم با PO Token
+    # اول کلاینت‌های بدون نیاز به PO
+    # سپس کلاینت‌های دارای PO.
     info, err = _try_clients(
         search,
         fmt,
@@ -472,17 +496,18 @@ def _extract_with_fallback(
     if info is not None:
         return info
 
-    # اگر خطا غیرمرتبط با بلاک بود، همان را برگردان.
     if err and not _is_block_error(
         str(err)
     ):
         logs.stage_fail(
             "YT_EXTRACT",
-            err=f"خطای غیربلاکی: {str(err)[:120]}",
+            err=(
+                "خطای غیربلاکی: "
+                f"{str(err)[:120]}"
+            ),
         )
         raise err
 
-    # اگر پروکسی واقعی داریم، بعد از تلاش مستقیم امتحانش کن.
     if use_proxy:
 
         info = _via_proxies(
@@ -497,7 +522,6 @@ def _extract_with_fallback(
         if info is not None:
             return info
 
-    # آخرین خطا
     if err:
         raise err
 
@@ -514,7 +538,6 @@ def _via_proxies(
     prior_err,
     proxy_list: Optional[list] = None,
 ):
-    """چرخش روی پروکسی‌های موجود."""
 
     if proxy_list is None:
         proxy_list = _get_proxy_list()
@@ -525,10 +548,6 @@ def _via_proxies(
     )
 
     if not proxy_list:
-        logs.info(
-            "YT: پروکسی موجود نیست؛ "
-            "رد کردن مسیر پروکسی"
-        )
         return None
 
     tried = 0
@@ -567,7 +586,9 @@ def _via_proxies(
 
             logs.stage_ok(
                 "YT_EXTRACT",
-                note=f"موفق با پروکسی #{i}",
+                note=(
+                    f"موفق با پروکسی #{i}"
+                ),
             )
 
             return info
@@ -728,7 +749,6 @@ async def search_title(
     loop = asyncio.get_event_loop()
 
     try:
-
         return await loop.run_in_executor(
             None,
             _search_title_sync,
