@@ -22,6 +22,7 @@ import config
 from bot import auth
 from bot import database as db
 from bot import subscription as sub
+from bot import group_config
 from bot import ui
 from bot.plugins import buy
 
@@ -196,6 +197,10 @@ async def order_decision_cb(client: Client, cq: CallbackQuery):
     if action == "ok":
         db.order_set_status(oid, "paid", f"تأیید مالک {cq.from_user.id}")
         sub.activate(chat_id, months, buyer_id=buyer_id)
+
+        # بعد از تأیید اشتراک، این گروه هم خودکار فعال شود
+        group_config.set_enabled(chat_id, True)
+
         status = sub.status_text(chat_id)
         cap, ents = decision_caption(order, group_name, buyer_name, buyer_id,
                                      True, status)
@@ -315,6 +320,10 @@ async def stars_paid(client: Client, message: Message):
 
     db.order_set_status(oid, "paid", "استارز")
     sub.activate(chat_id, months, buyer_id=buyer_id)
+
+    # پرداخت استارز هم گروه را خودکار فعال می‌کند
+    group_config.set_enabled(chat_id, True)
+
     status = sub.status_text(chat_id)
 
     group_name = await buy.chat_title(client, chat_id)
